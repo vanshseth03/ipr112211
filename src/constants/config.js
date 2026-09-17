@@ -11,6 +11,10 @@ export const CLOUD_API_BASE = typeof window !== 'undefined'
   ? window.location.origin
   : (process.env.EXPO_PUBLIC_CLOUD_API_URL || 'https://ipr112211.vercel.app');
 
+export const isLocalhost = typeof window !== 'undefined'
+  ? (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+  : true;
+
 // Fallback URL (will be overwritten by Gist registry)
 let _resolvedBackendUrl = '';
 let _serverReady = false;
@@ -68,61 +72,67 @@ export async function fetchServerRegistry(forceFresh = false) {
 
     let registry = null;
 
-    // Strategy 0: Cloud Serverless API (/api/server/status) — Central API for Web & Mobile
-    try {
-      const cCtrl = new AbortController();
-      const cTimer = setTimeout(() => cCtrl.abort(), 3000);
-      const cResp = await fetch(`${CLOUD_API_BASE}/api/server/status`, {
-        signal: cCtrl.signal,
-        headers: { 'User-Agent': 'AYUSH-IPR-Guardian' },
-      });
-      clearTimeout(cTimer);
-      if (cResp.ok) {
-        const cData = await cResp.json();
-        if (cData?.server_url) {
-          registry = {
-            server_url: cData.server_url,
-            status: cData.status || 'running',
-            started_at: cData.started_at || new Date().toISOString(),
-          };
-        } else if (cData?.status === 'booting') {
-          _serverStatus = 'booting';
+    // Strategy 0: Cloud Serverless API (/api/status & /api/server/status) — Central API for Web & Mobile
+    for (const statusPath of [`${CLOUD_API_BASE}/api/status`, `${CLOUD_API_BASE}/api/server/status`]) {
+      if (registry?.server_url) break;
+      try {
+        const cCtrl = new AbortController();
+        const cTimer = setTimeout(() => cCtrl.abort(), 3000);
+        const cResp = await fetch(statusPath, {
+          signal: cCtrl.signal,
+          headers: { 'User-Agent': 'AYUSH-IPR-Guardian' },
+        });
+        clearTimeout(cTimer);
+        if (cResp.ok) {
+          const cData = await cResp.json();
+          if (cData?.server_url) {
+            registry = {
+              server_url: cData.server_url,
+              status: cData.status || 'running',
+              started_at: cData.started_at || new Date().toISOString(),
+            };
+          } else if (cData?.status === 'booting') {
+            _serverStatus = 'booting';
+          }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
 
-    // Strategy 1: Local daemon (fastest on localhost, 0ms, already monitoring Kaggle + Gist)
-    try {
-      const dCtrl = new AbortController();
-      const dTimer = setTimeout(() => dCtrl.abort(), 1500);
-      const dResp = await fetch(DAEMON_STATUS_URL, {
-        signal: dCtrl.signal,
-        headers: { 'User-Agent': 'AYUSH-IPR-Guardian' },
-      });
-      clearTimeout(dTimer);
-      if (dResp.ok) {
-        const dData = await dResp.json();
-        if (dData?.server_url) {
-          registry = {
-            server_url: dData.server_url,
-            status: dData.status || 'running',
-            started_at: new Date().toISOString(),
-          };
+    // Strategy 1: Local daemon (ONLY on localhost — strictly disabled on Vercel to avoid loopback CORS block)
+    if (isLocalhost && !registry?.server_url) {
+      try {
+        const dCtrl = new AbortController();
+        const dTimer = setTimeout(() => dCtrl.abort(), 1500);
+        const dResp = await fetch(DAEMON_STATUS_URL, {
+          signal: dCtrl.signal,
+          headers: { 'User-Agent': 'AYUSH-IPR-Guardian' },
+        });
+        clearTimeout(dTimer);
+        if (dResp.ok) {
+          const dData = await dResp.json();
+          if (dData?.server_url) {
+            registry = {
+              server_url: dData.server_url,
+              status: dData.status || 'running',
+              started_at: new Date().toISOString(),
+            };
+          }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
 
-    // Strategy 2: GitHub Gist API with Bearer token (5,000 requests/hr limit)
+    // Strategy 2: GitHub Gist API (only attach Authorization if GITHUB_TOKEN is present to prevent 401)
     if (!registry?.server_url) {
       try {
         const gCtrl = new AbortController();
         const gTimer = setTimeout(() => gCtrl.abort(), 3500);
+        const gHeaders = { 'User-Agent': 'AYUSH-IPR-Guardian' };
+        if (GITHUB_TOKEN) {
+          gHeaders['Authorization'] = `Bearer ${GITHUB_TOKEN}`;
+        }
         const resp = await fetch(GIST_REGISTRY_URL, {
           signal: gCtrl.signal,
-          headers: {
-            'Authorization': `Bearer ${GITHUB_TOKEN}`,
-            'User-Agent': 'AYUSH-IPR-Guardian',
-          },
+          headers: gHeaders,
           cache: 'no-cache',
         });
         clearTimeout(gTimer);
@@ -321,36 +331,41 @@ export async function triggerServerStart() {
   }
   _triggerInFlight = true;
 
-  // 1. Try Cloud Serverless API endpoint first (/api/server/start)
   try {
-    const cResp = await fetch(`${CLOUD_API_BASE}/api/server/start`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': 'AYUSH-IPR-App' },
-    });
-    if (cResp.ok) {
-      const cData = await cResp.json();
-      _serverStatus = 'booting';
-      return cData;
+    // 1. Try Cloud Serverless API endpoints (/api/start & /api/server/start)
+    for (const startPath of [`${CLOUD_API_BASE}/api/start`, `${CLOUD_API_BASE}/api/server/start`]) {
+      try {
+        const cResp = await fetch(startPath, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'User-Agent': 'AYUSH-IPR-App' },
+        });
+        if (cResp.ok) {
+          const cData = await cResp.json();
+          _serverStatus = 'booting';
+          return cData;
+        }
+      } catch (_) {}
     }
-  } catch (err) {
-    console.warn('[Trigger] Cloud API start note:', err.message);
+
+    // 2. Only if on localhost, fallback to local auto-start daemon (port 3333)
+    if (isLocalhost) {
+      try {
+        const resp = await fetch(`${APP_CONFIG.triggerDaemonUrl}/start`, {
+          headers: { 'User-Agent': 'AYUSH-IPR-App' },
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          _serverStatus = 'booting';
+          return data;
+        }
+      } catch (err) {
+        console.warn('[Trigger] Local daemon not reachable:', err.message);
+      }
+    }
+  } finally {
+    _triggerInFlight = false;
   }
 
-  // 2. Fallback to local auto-start daemon (port 3333)
-  try {
-    const resp = await fetch(`${APP_CONFIG.triggerDaemonUrl}/start`, {
-      headers: { 'User-Agent': 'AYUSH-IPR-App' },
-    });
-    if (resp.ok) {
-      const data = await resp.json();
-      _serverStatus = 'booting';
-      return data;
-    }
-  } catch (err) {
-    console.warn('[Trigger] Local daemon not reachable:', err.message);
-  } finally {
-    setTimeout(() => { _triggerInFlight = false; }, 30000);
-  }
   return null;
 }
 
@@ -358,37 +373,39 @@ export async function triggerServerStart() {
  * Shut down the Kaggle GPU worker on demand to conserve GPU quota.
  */
 export async function triggerServerStop() {
-  // 1. Try Cloud Serverless API endpoint first
-  try {
-    const cResp = await fetch(`${CLOUD_API_BASE}/api/server/stop`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': 'AYUSH-IPR-App' },
-    });
-    if (cResp.ok) {
-      const cData = await cResp.json();
-      _serverReady = false;
-      _serverStatus = 'offline';
-      _resolvedBackendUrl = '';
-      return cData;
-    }
-  } catch (err) {
-    console.warn('[Stop] Cloud API stop note:', err.message);
+  // 1. Try Cloud Serverless API endpoints (/api/stop & /api/server/stop)
+  for (const stopPath of [`${CLOUD_API_BASE}/api/stop`, `${CLOUD_API_BASE}/api/server/stop`]) {
+    try {
+      const cResp = await fetch(stopPath, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'User-Agent': 'AYUSH-IPR-App' },
+      });
+      if (cResp.ok) {
+        const cData = await cResp.json();
+        _serverReady = false;
+        _serverStatus = 'offline';
+        _resolvedBackendUrl = '';
+        return cData;
+      }
+    } catch (_) {}
   }
 
-  // 2. Fallback to local daemon
-  try {
-    const resp = await fetch(`${APP_CONFIG.triggerDaemonUrl}/stop`, {
-      headers: { 'User-Agent': 'AYUSH-IPR-App' },
-    });
-    if (resp.ok) {
-      const data = await resp.json();
-      _serverReady = false;
-      _serverStatus = 'offline';
-      _resolvedBackendUrl = '';
-      return data;
+  // 2. Only if on localhost, fallback to local daemon
+  if (isLocalhost) {
+    try {
+      const resp = await fetch(`${APP_CONFIG.triggerDaemonUrl}/stop`, {
+        headers: { 'User-Agent': 'AYUSH-IPR-App' },
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        _serverReady = false;
+        _serverStatus = 'offline';
+        _resolvedBackendUrl = '';
+        return data;
+      }
+    } catch (err) {
+      console.warn('[Stop] Local daemon stop error:', err.message);
     }
-  } catch (err) {
-    console.warn('[Stop] Local daemon stop error:', err.message);
   }
   return null;
 }

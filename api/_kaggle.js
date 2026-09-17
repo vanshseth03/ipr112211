@@ -9,7 +9,7 @@ const DEFAULT_KAGGLE_KEY = '75c22236a6ebde0410820d13b3b77088';
 const KERNEL_SLUG = 'ayush-ipr-guardian';
 
 function getKaggleCredentials() {
-  const username = process.env.KAGGLE_USERNAME || 'vanshseth003';
+  const username = process.env.KAGGLE_USERNAME || KAGGLE_USERNAME;
   let key = process.env.KAGGLE_KEY || '';
 
   if (!key) {
@@ -185,7 +185,7 @@ async function readGistRegistry() {
     }
   } catch (_) {}
 
-  // Fallback to raw URL
+  // Fallback to raw URL (never rate-limited)
   try {
     const rawRes = await fetch(
       `https://gist.githubusercontent.com/vanshseth03/${GIST_ID}/raw/${GIST_FILENAME}?t=${Date.now()}`,

@@ -62,6 +62,9 @@ module.exports = async function handler(req, res) {
       scriptText = require('./_server_code');
     } catch (_) {
       let serverPyPath = path.join(__dirname, 'server.py');
+      if (!fs.existsSync(serverPyPath)) {
+        serverPyPath = path.join(__dirname, 'server', 'server.py');
+      }
       if (fs.existsSync(serverPyPath)) {
         scriptText = fs.readFileSync(serverPyPath, 'utf-8');
       }
