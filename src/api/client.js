@@ -1,4 +1,4 @@
-import { APP_CONFIG, API_TIMEOUT_MS } from '../constants/config';
+import { APP_CONFIG, API_TIMEOUT_MS, getBackendUrl, fetchServerRegistry, invalidateRegistryCache } from '../constants/config';
 import { useAuthStore } from '../store/authStore';
 import { useSettingsStore } from '../store/settingsStore';
 import { createApiError } from '../models/api';
@@ -15,7 +15,22 @@ export async function apiRequest(path, options = {}) {
     return handleMockRequest(path, options);
   }
 
-  const baseUrl = options.baseUrl || APP_CONFIG.apiBaseUrl;
+  // Dynamic URL resolution from Gist registry
+  let baseUrl = options.baseUrl || APP_CONFIG.apiBaseUrl;
+
+  // If no URL available yet, try to resolve from registry
+  if (!baseUrl) {
+    const backendUrl = await getBackendUrl();
+    if (!backendUrl) {
+      throw createApiError({
+        status: 0,
+        code: 'SERVER_OFFLINE',
+        message: 'Server is offline. Starting up — please wait a moment and try again.',
+      });
+    }
+    baseUrl = `${backendUrl}/api`;
+  }
+
   const url = `${baseUrl}${path}`;
   const timeoutMs = options.timeoutMs || API_TIMEOUT_MS;
 
@@ -52,6 +67,24 @@ export async function apiRequest(path, options = {}) {
       });
     }
 
+    // Server is still loading models
+    if (response.status === 503) {
+      throw createApiError({
+        status: 503,
+        code: 'SERVER_LOADING',
+        message: 'Server is starting up. Models are loading — please wait a moment and try again.',
+      });
+    }
+
+    // Rate limited
+    if (response.status === 429) {
+      throw createApiError({
+        status: 429,
+        code: 'RATE_LIMITED',
+        message: 'Too many requests. Please wait a moment before trying again.',
+      });
+    }
+
     if (!response.ok) {
       const errorText = await response.text().catch(() => '');
       throw createApiError({
@@ -81,6 +114,9 @@ export async function apiRequest(path, options = {}) {
     if (error.status && error.code) {
       throw error;
     }
+
+    // Network error — invalidate cache so next request re-checks registry
+    invalidateRegistryCache();
 
     throw createApiError({
       status: 0,

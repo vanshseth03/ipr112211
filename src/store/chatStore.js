@@ -66,9 +66,8 @@ export const useChatStore = create(
     {
       name: 'ayurveda_chat_history',
       storage: createJSONStorage(() => universalStorage),
-      // Only persist messages and conversation id, NOT streaming state
+      // Only persist activeConversationId, new sessions start fresh
       partialize: (state) => ({
-        messages: state.messages,
         activeConversationId: state.activeConversationId,
       }),
     }

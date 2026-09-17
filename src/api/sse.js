@@ -1,4 +1,4 @@
-import { APP_CONFIG } from '../constants/config';
+import { APP_CONFIG, getBackendUrl, getLastKnownBackendUrl } from '../constants/config';
 import { useAuthStore } from '../store/authStore';
 import { useSettingsStore } from '../store/settingsStore';
 
@@ -21,12 +21,22 @@ export function createSSEConnection(urlOrPath, options = {}) {
 
   let isCancelled = false;
 
-  // Resolve target URL
+  // Resolve target URL dynamically
   let fullUrl = APP_CONFIG.sseBaseUrl;
+
+  // If no SSE base URL (server not resolved yet), try sync fallback
+  if (!fullUrl) {
+    const lastUrl = getLastKnownBackendUrl();
+    if (lastUrl) {
+      fullUrl = `${lastUrl}/api/chat/stream`;
+    }
+  }
+
   if (urlOrPath && urlOrPath.startsWith('http')) {
     fullUrl = urlOrPath;
   } else if (urlOrPath && urlOrPath !== '/chat/stream') {
-    fullUrl = `${APP_CONFIG.apiBaseUrl}${urlOrPath.startsWith('/') ? '' : '/'}${urlOrPath}`;
+    const apiBase = APP_CONFIG.apiBaseUrl || `${getLastKnownBackendUrl()}/api`;
+    fullUrl = `${apiBase}${urlOrPath.startsWith('/') ? '' : '/'}${urlOrPath}`;
   }
 
   const token = useAuthStore.getState().accessToken;

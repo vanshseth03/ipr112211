@@ -127,7 +127,9 @@ function LiveSoundWave({ active, color = colors.brandLight }) {
 export default function VoiceOverlay({
   visible = false,
   isListening = false,
+  isProcessing = false,
   transcript = '',
+  aiResponse = '',
   onClose,
   onStop,
 }) {
@@ -318,7 +320,7 @@ export default function VoiceOverlay({
             </View>
           </View>
 
-          {/* ─── Status & Dynamic Phrase ───────────────────────────── */}
+          {/* ─── Status & Dynamic Phrase ──────────────────────────── */}
           <View style={styles.statusSection}>
             <View style={styles.statusBadge}>
               <Sparkles size={14} color={colors.accent} strokeWidth={2.2} />
@@ -327,28 +329,33 @@ export default function VoiceOverlay({
                   ? t('microphoneMuted', language)
                   : isListening
                   ? t('listening', language)
-                  : t('synthesizing', language)}
+                  : isProcessing
+                  ? 'Processing...'
+                  : 'Speaking...'}
               </Text>
             </View>
-            <Text style={styles.thinkingPhraseText}>{thinkingPhrase}</Text>
+            <Text style={styles.thinkingPhraseText}>
+              {isProcessing ? thinkingPhrase : isListening ? 'Speak now...' : ''}
+            </Text>
 
             {/* Live Waveform */}
             <LiveSoundWave active={isListening && !isMuted} color={colors.accent} />
           </View>
 
-          {/* ─── Live Transcript Preview ──────────────────────────── */}
+          {/* ─── Live Transcript + AI Response ────────────────── */}
           <View style={styles.transcriptCard}>
-            <Text style={styles.transcriptLabel}>{t('liveTranscript', language)}</Text>
-            <Text
-              style={styles.transcriptText}
-              numberOfLines={3}
-            >
-              {transcript
-                ? transcript
-                : isListening
-                ? t('voicePlaceholder', language)
-                : t('synthesizing', language)}
+            <Text style={styles.transcriptLabel}>YOU SAID</Text>
+            <Text style={styles.transcriptText} numberOfLines={2}>
+              {transcript || (isListening ? t('voicePlaceholder', language) : 'Waiting...')}
             </Text>
+            {aiResponse ? (
+              <>
+                <Text style={[styles.transcriptLabel, { marginTop: 10, color: '#52B788' }]}>AI RESPONSE</Text>
+                <Text style={styles.transcriptText} numberOfLines={4}>
+                  {aiResponse}
+                </Text>
+              </>
+            ) : null}
           </View>
 
           {/* ─── Bottom Call Controls ──────────────────────────────── */}

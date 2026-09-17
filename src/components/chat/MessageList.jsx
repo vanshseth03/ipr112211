@@ -63,7 +63,7 @@ function IconAction({ icon: Icon, activeIcon: ActiveIcon, label, onPress, active
       ]}
     >
       {loading ? (
-        <Animated.View style={{ transform: [{ rotate: spin }] }}>
+        <Animated.View style={Platform.OS === 'web' ? { animation: 'spinContinuous 0.8s linear infinite' } : { transform: [{ rotate: spin }] }}>
           {iconElement}
         </Animated.View>
       ) : (
@@ -99,6 +99,7 @@ export default function MessageList({
   onReload,
   speakingMessageId,
   isLoadingTTS = false,
+  isStreaming = false,
   reloadingMessageId,
 }) {
   const flatListRef = useRef(null);
@@ -117,15 +118,16 @@ export default function MessageList({
       ref={flatListRef}
       data={messages}
       keyExtractor={(item, index) => String(item.id ?? index)}
-      renderItem={({ item }) => {
+      renderItem={({ item, index }) => {
         const isUser = item.role === 'user';
         const isSpeaking = speakingMessageId != null && speakingMessageId === item.id;
         const isItemLoading = isLoadingTTS && speakingMessageId === item.id;
+        const isGenerating = isStreaming && index === messages.length - 1;
 
         return (
           <View style={styles.itemContainer}>
             <ChatBubble message={item} isUser={isUser} />
-            {!isUser && item.content ? (
+            {!isUser && item.content && !isStreaming ? (
               <View style={styles.extrasContainer}>
                 {/* Action icons — compact row */}
                 <View style={styles.actionRow}>

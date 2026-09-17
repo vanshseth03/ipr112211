@@ -154,6 +154,21 @@ textarea {
   }
 }
 
+@keyframes spinContinuous {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.spin-continuous,
+.spin-continuous svg {
+  animation: spinContinuous 1s linear infinite !important;
+  transform-origin: 50% 50% !important;
+}
+
 @keyframes shimmer {
   0% {
     background-position: -200% 0;

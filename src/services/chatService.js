@@ -14,11 +14,12 @@ export async function sendMessage(message, options = {}) {
 }
 
 export function streamChatMessage(message, options = {}) {
-  const { onToken, onSources, onComplete, onError, ...rest } = options;
+  const { onToken, onSources, onComplete, onError, messages, history, ...rest } = options;
   const payload = {
     query: message,
     message,
     top_k: 5,
+    messages: messages || history || [],
     ...rest,
   };
 

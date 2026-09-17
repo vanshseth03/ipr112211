@@ -149,48 +149,53 @@ export default function HistoryScreen() {
               : '';
 
             return (
-              <TouchableOpacity
-                key={item.id}
-                style={styles.card}
-                onPress={() => handleOpenItem(item)}
-                accessibilityRole="button"
-                accessibilityLabel={`${item.title}`}
-              >
-                <View style={styles.cardHeader}>
-                  <View style={[styles.badge, { backgroundColor: meta.bg }]}>
-                    <TypeIcon size={11} color={meta.fg} strokeWidth={2.5} />
-                    <Text style={[styles.badgeText, { color: meta.fg }]}>
-                      {meta.label}
-                    </Text>
+              <View key={item.id} style={styles.card}>
+                <TouchableOpacity
+                  style={styles.cardBody}
+                  onPress={() => handleOpenItem(item)}
+                  activeOpacity={0.7}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${item.title}`}
+                >
+                  <View style={styles.cardHeader}>
+                    <View style={[styles.badge, { backgroundColor: meta.bg }]}>
+                      <TypeIcon size={11} color={meta.fg} strokeWidth={2.5} />
+                      <Text style={[styles.badgeText, { color: meta.fg }]}>
+                        {meta.label}
+                      </Text>
+                    </View>
+                    <Text style={styles.dateText}>{dateStr}</Text>
                   </View>
-                  <Text style={styles.dateText}>{dateStr}</Text>
-                </View>
 
-                <Text style={styles.cardTitle} numberOfLines={1}>
-                  {item.title}
-                </Text>
-                <Text style={styles.cardSummary} numberOfLines={2}>
-                  {item.summary}
-                </Text>
+                  <Text style={styles.cardTitle} numberOfLines={1}>
+                    {item.title}
+                  </Text>
+                  <Text style={styles.cardSummary} numberOfLines={2}>
+                    {item.summary}
+                  </Text>
+                </TouchableOpacity>
 
                 <View style={styles.cardFooter}>
-                  <View style={styles.openLinkRow}>
+                  <TouchableOpacity
+                    style={styles.openLinkRow}
+                    onPress={() => handleOpenItem(item)}
+                    activeOpacity={0.7}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${t('open', language)}: ${item.title}`}
+                  >
                     <Text style={styles.openLink}>{t('open', language)}</Text>
                     <ArrowRight size={13} color={colors.brand} strokeWidth={2.25} />
-                  </View>
+                  </TouchableOpacity>
                   <TouchableOpacity
                     style={styles.deleteBtn}
-                    onPress={(e) => {
-                      e.stopPropagation?.();
-                      deleteItem(item.id);
-                    }}
+                    onPress={() => deleteItem(item.id)}
                     accessibilityRole="button"
                     accessibilityLabel={t('delete', language)}
                   >
                     <Trash2 size={13} color={colors.textMuted} strokeWidth={2} />
                   </TouchableOpacity>
                 </View>
-              </TouchableOpacity>
+              </View>
             );
           })
         )}
@@ -275,6 +280,9 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     gap: spacing.sm,
     ...shadow.sm,
+  },
+  cardBody: {
+    gap: spacing.sm,
   },
   cardHeader: {
     flexDirection: 'row',

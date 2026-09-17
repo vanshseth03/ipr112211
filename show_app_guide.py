@@ -8,7 +8,7 @@ BANNER = """
 ================================================================================
    🌿  AYUSH-IPR GUARDIAN — CROSS-PLATFORM EXPO APPLICATION (v1.0.0)  🌿
 ================================================================================
-  Connected Live Backend : https://breezy-windows-doubt.loca.lt
+  Connected Live Backend : https://permanent-relatively-bra-reforms.trycloudflare.com
   LLM Engine             : Gemma-2-2B-IT (float16) on Dual GPU T4
   Vector Search & RAG    : BGE-M3 + BGE-Reranker-Large (362 Statutory Sections)
   Voice & Audio Engine   : Faster-Whisper ASR (GPU Accelerated)

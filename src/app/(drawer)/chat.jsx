@@ -8,25 +8,33 @@ import {
   Alert,
   Pressable,
   Easing,
+  Platform,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Leaf, Plus, Trash2, ArrowRight } from 'lucide-react-native';
+import { Leaf, Plus, Trash2, ArrowRight, Loader2 } from 'lucide-react-native';
 
 import MessageList from '../../components/chat/MessageList';
 import InputBar from '../../components/chat/InputBar';
-import VoiceOverlay from '../../components/voice/VoiceOverlay';
 
 import { useChatStore } from '../../store/chatStore';
 import { useSettingsStore } from '../../store/settingsStore';
 import { useHistoryStore } from '../../store/historyStore';
+import { useAuthStore } from '../../store/authStore';
 import { useLanguagePref } from '../../hooks/useLanguagePref';
 import { useSpeak } from '../../hooks/useSpeak';
-import { useVoiceSession } from '../../hooks/useVoiceSession';
 import { useFileUpload } from '../../hooks/useFileUpload';
 
 import { sendMessage, streamChatMessage } from '../../services/chatService';
 import { createChatMessage, CHAT_ROLES } from '../../models/chat';
-import { getRandomThinkingPhrase, t } from '../../constants/config';
+import {
+  APP_CONFIG,
+  getRandomThinkingPhrase,
+  t,
+  fetchServerRegistry,
+  triggerServerStart,
+  waitForServer,
+} from '../../constants/config';
 import { colors, spacing, typography, radii, shadow } from '../../constants/theme';
 
 const SUGGESTED_PROMPTS = [
@@ -104,6 +112,20 @@ function FloatingLeaf({ delay = 0 }) {
   );
 }
 
+// ─── Server Starting Banner ──────────────────────────────────
+function ServerStartingBanner({ visible, statusText }) {
+  if (!visible) return null;
+
+  return (
+    <View style={styles.serverBanner}>
+      <ActivityIndicator size="small" color={colors.brand} style={{ marginRight: 8 }} />
+      <Text style={styles.serverBannerText}>
+        {statusText || 'Starting server — loading AI models, please wait...'}
+      </Text>
+    </View>
+  );
+}
+
 // ─── Thinking status bar during streaming ────────────────────────
 function ThinkingBar({ visible, language = 'en' }) {
   const [phrase, setPhrase] = useState(getRandomThinkingPhrase(language));
@@ -157,13 +179,6 @@ export default function ChatScreen() {
   const { addItem: addHistoryItem } = useHistoryStore();
   const { speak, stop: stopSpeak, isSpeaking, isLoadingTTS, speakingMessageId } = useSpeak();
   const {
-    isConnected,
-    isListening,
-    transcript: voiceTranscript,
-    connect: connectVoice,
-    disconnect: disconnectVoice,
-  } = useVoiceSession();
-  const {
     file: attachedFile,
     setFile: setAttachedFile,
     selectDocument,
@@ -172,25 +187,40 @@ export default function ChatScreen() {
     clearFile: clearAttachedFile,
   } = useFileUpload();
 
-  const [voiceOverlayVisible, setVoiceOverlayVisible] = useState(false);
+  // Server auto-start state
+  const [serverStarting, setServerStarting] = useState(false);
+  const [serverBannerText, setServerBannerText] = useState('');
+  const pendingMessageRef = useRef(null);
 
   useEffect(() => {
-    // Only seed welcome message if there are no messages after initial tick
-    const timer = setTimeout(() => {
-      const currentMessages = useChatStore.getState().messages;
-      if (!currentMessages || currentMessages.length === 0) {
-        addMessage(
-          createChatMessage({
-            role: CHAT_ROLES.ASSISTANT,
-            content:
-              'Welcome to the **Ayurveda IPR Assistant**.\n\nI can help you evaluate **patentability under Section 3(p)**, check **Traditional Knowledge Digital Library (TKDL)** prior art, analyze polyherbal synergy, and guide Ayush certification.\n\nHow may I assist your formulation research today?',
-          })
-        );
-      }
-    }, 200);
+    // Always open a fresh new chat when a new session is initiated
+    newConversation();
+    addMessage(
+      createChatMessage({
+        role: CHAT_ROLES.ASSISTANT,
+        content:
+          'Welcome to the **Ayurveda IPR Assistant**.\n\nI can help you evaluate **patentability under Section 3(p)**, check **Traditional Knowledge Digital Library (TKDL)** prior art, analyze polyherbal synergy, and guide Ayush certification.\n\nHow may I assist your formulation research today?',
+      })
+    );
+  }, []);
 
-    return () => clearTimeout(timer);
-  }, [addMessage]);
+function detectQueryLanguage(text) {
+  if (!text) return 'en';
+  if (/[\u0900-\u097F]/.test(text)) return 'hi';
+  const hinglishWords = new Set([
+    'kya', 'hai', 'hain', 'ke', 'ki', 'ko', 'ka', 'me', 'mein', 'se', 'sb', 'sab',
+    'btayo', 'batao', 'bataiye', 'karo', 'karein', 'baare', 'barein', 'hota', 'hoti',
+    'hote', 'nahi', 'nahin', 'na', 'mat', 'liye', 'kaise', 'kaisa', 'kahan', 'kab',
+    'kyun', 'kyu', 'namaste', 'namaskar', 'bhi', 'kuch', 'aur', 'karna', 'kariye',
+    'kijiye', 'chahiye', 'sakta', 'sakti', 'sakte', 'btao'
+  ]);
+  const words = text.toLowerCase().match(/[a-z]+/g) || [];
+  let matches = 0;
+  for (const w of words) {
+    if (hinglishWords.has(w)) matches++;
+  }
+  return (matches >= 2 || (words.length <= 6 && matches >= 1)) ? 'hi' : 'en';
+}
 
   const handleSend = async (text) => {
     const trimmed = text?.trim() || '';
@@ -198,8 +228,77 @@ export default function ChatScreen() {
 
     let fullPrompt = trimmed;
     if (attachedFile) {
-      const fileHeader = `[Attached ${attachedFile.type === 'image' ? 'Image' : 'Document'}: ${attachedFile.name}${attachedFile.size ? ` (${(attachedFile.size / (1024 * 1024)).toFixed(1)}MB)` : ''}]`;
-      fullPrompt = trimmed ? `${fileHeader}\n\n${trimmed}` : `${fileHeader}\nPlease analyze this formulation document for TKDL prior art overlap and Section 3(p) patentability.`;
+      const sizeStr = attachedFile.size ? ` (${(attachedFile.size / 1024).toFixed(1)}KB)` : '';
+      const fileHeader = `[Attached ${attachedFile.type === 'image' ? 'Image' : 'Document'}: ${attachedFile.name}${sizeStr}]`;
+      
+      let docExcerpt = '';
+      if (attachedFile.file) {
+        try {
+          const fname = attachedFile.name?.toLowerCase() || '';
+          const isPdf = fname.endsWith('.pdf') || attachedFile.mimeType?.includes('pdf');
+          const isImage = fname.endsWith('.png') || fname.endsWith('.jpg') || fname.endsWith('.jpeg') || attachedFile.mimeType?.includes('image');
+
+          if (isPdf || isImage) {
+            const formData = new FormData();
+            formData.append('file', attachedFile.file, attachedFile.name);
+            const token = useAuthStore.getState().accessToken;
+
+            const extractRes = await fetch(`${APP_CONFIG.apiBaseUrl}/document/extract`, {
+              method: 'POST',
+              headers: {
+                'Bypass-Tunnel-Reminder': 'true',
+                'bypass-tunnel-reminder': '1',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+              },
+              body: formData,
+            });
+
+            if (extractRes.ok) {
+              const extractData = await extractRes.json();
+              if (extractData.text && extractData.text.trim()) {
+                docExcerpt = `\n\n--- Extracted Document Content (${(extractData.file_type || 'DOC').toUpperCase()}: ${extractData.filename}) ---\n${extractData.text.trim()}`;
+              }
+            }
+          } else if (typeof attachedFile.file.text === 'function') {
+            const rawText = await attachedFile.file.text();
+            if (rawText && rawText.trim()) {
+              docExcerpt = `\n\n--- Document Content ---\n${rawText.trim().slice(0, 6000)}`;
+            }
+          }
+        } catch (e) {
+          console.warn('[Chat] Could not extract text from document:', e);
+        }
+      }
+
+      fullPrompt = trimmed
+        ? `${fileHeader}${docExcerpt}\n\n${trimmed}`
+        : `${fileHeader}${docExcerpt}\nPlease analyze this formulation document for TKDL prior art overlap and Section 3(p) patentability.`;
+    }
+
+    const detectedLang = detectQueryLanguage(fullPrompt);
+    const effectiveLang = (language === 'hi' || detectedLang === 'hi') ? 'hi' : 'en';
+
+    // Build clean, strictly alternating conversation history for multi-turn context
+    const validHistoryMessages = messages.filter(
+      (m) =>
+        (m.role === CHAT_ROLES.USER || m.role === CHAT_ROLES.ASSISTANT) &&
+        m.content &&
+        typeof m.content === 'string' &&
+        m.content.trim().length > 0 &&
+        !m.isBooting
+    );
+
+    const chatHistory = [];
+    let expectedRole = CHAT_ROLES.USER;
+    for (const m of validHistoryMessages.slice(-8)) {
+      if (m.role === expectedRole) {
+        chatHistory.push({ role: m.role, content: m.content.trim() });
+        expectedRole = expectedRole === CHAT_ROLES.USER ? CHAT_ROLES.ASSISTANT : CHAT_ROLES.USER;
+      }
+    }
+    // Multi-turn context must end on an assistant turn so current query is the alternating user turn
+    while (chatHistory.length > 0 && chatHistory[chatHistory.length - 1].role !== CHAT_ROLES.ASSISTANT) {
+      chatHistory.pop();
     }
 
     const userMsg = createChatMessage({ role: CHAT_ROLES.USER, content: fullPrompt });
@@ -212,10 +311,94 @@ export default function ChatScreen() {
     setIsStreaming(true);
     let accumulatedText = '';
 
+    // ─── Check if server is available, auto-start if needed ───
+    // ALWAYS prompts /api/health FIRST to acknowledge whether server is actually present!
+    const reg = await fetchServerRegistry(true);
+    if (!reg?.url || !reg?.ready) {
+      setServerStarting(true);
+      const initialStep = reg?.needRepush ? 'pushing' : (reg?.step || 'checking');
+      const initialMsg = reg?.needRepush
+        ? 'Server offline. Triggering Kaggle GPU kernel push...'
+        : (reg?.stepDisplay || 'Pinging server health and checking models...');
+
+      setServerBannerText(initialMsg);
+
+      // Store pending message to re-send after server is up
+      pendingMessageRef.current = { fullPrompt, effectiveLang, chatHistory, assistantMsgId };
+
+      // Set assistant message to server booting state with animated spinner card
+      updateMessage(assistantMsgId, {
+        isBooting: true,
+        bootStep: initialStep,
+        bootStepDisplay: initialMsg,
+        content: '',
+      });
+
+      // If repush needed, trigger daemon
+      if (reg?.needRepush || reg?.status === 'offline') {
+        const trigger = await triggerServerStart();
+        if (trigger?.triggered) {
+          setServerBannerText('Kaggle kernel pushed! Initializing GPU container...');
+          updateMessage(assistantMsgId, {
+            isBooting: true,
+            bootStep: 'pushing',
+            bootStepDisplay: 'Kaggle GPU kernel pushed. Waiting for Cloudflare tunnel URL...',
+            content: '',
+          });
+        }
+      }
+
+      // Webpage enters continuous loop with Cloudflare tunnel /api/health.
+      // NEVER QUITS. Locks the architecture into the loop until server is completely ready!
+      const url = await waitForServer((status) => {
+        setServerBannerText(status.message);
+        updateMessage(assistantMsgId, {
+          isBooting: true,
+          bootStep: status.step,
+          bootStepDisplay: status.message,
+          bootUrl: status.url,
+          content: '',
+        });
+      });
+
+      // Server is now completely ready!
+      setServerBannerText('Server ready! Generating response...');
+      updateMessage(assistantMsgId, {
+        isBooting: true,
+        bootStep: 'ready',
+        bootStepDisplay: 'All models loaded. AI Legal Advisory ready!',
+        content: '',
+      });
+
+      // Brief transition delay so user observes the ready confirmation
+      await new Promise((r) => setTimeout(r, 400));
+
+      setServerStarting(false);
+      updateMessage(assistantMsgId, {
+        isBooting: false,
+        content: '',
+      });
+      accumulatedText = '';
+    }
+
+    // Enhance outgoing query with domain grounding to prevent LLM precedent hallucinations
+    let outgoingQuery = fullPrompt;
+    const lowerPrompt = fullPrompt.toLowerCase();
+    if (lowerPrompt.includes('turmeric') || lowerPrompt.includes('curcumin') || lowerPrompt.includes('haridra')) {
+      if (!lowerPrompt.includes('divya pharmacy')) {
+        outgoingQuery = `${fullPrompt}\n\n[Legal Precedent Grounding: The Turmeric patent revocation was USPTO Patent 5,401,504 challenged by CSIR using classical treatises (Charaka Samhita, Sushruta Samhita). Divya Pharmacy v. Union of India (2018) is strictly about Biological Diversity Act ABS benefit sharing and is NOT related to turmeric.]`;
+      }
+    } else if (lowerPrompt.includes('neem') || lowerPrompt.includes('azadirachta')) {
+      if (!lowerPrompt.includes('divya pharmacy')) {
+        outgoingQuery = `${fullPrompt}\n\n[Legal Precedent Grounding: The Neem patent revocation was EPO Patent 436,257 challenged by Vandana Shiva/EPO for fungicidal use. Divya Pharmacy is strictly about Biological Diversity Act ABS.]`;
+      }
+    }
+
     try {
-      const connection = streamChatMessage(fullPrompt, {
+      const connection = streamChatMessage(outgoingQuery, {
         jurisdiction,
-        language,
+        language: effectiveLang,
+        messages: chatHistory,
         onToken: (token) => {
           accumulatedText += token;
           updateMessage(assistantMsgId, { content: accumulatedText });
@@ -235,7 +418,7 @@ export default function ChatScreen() {
           console.warn('[SSE fallback]:', err);
           if (!accumulatedText) {
             try {
-              const res = await sendMessage(fullPrompt, { jurisdiction, language });
+              const res = await sendMessage(outgoingQuery, { jurisdiction, language: effectiveLang, messages: chatHistory });
               updateMessage(assistantMsgId, { content: res.answer || res.content || 'Analysis completed.' });
             } catch (fallbackErr) {
               updateMessage(assistantMsgId, { content: `Unable to complete query: ${fallbackErr.message || err.message}` });
@@ -259,23 +442,13 @@ export default function ChatScreen() {
         stopSpeak();
         return;
       }
-      const plainText = message.content.replace(/[*#_]/g, '');
-      speak(plainText, {
-        language: language === 'hi' ? 'hi-IN' : 'en-IN',
+      const isMsgHindi = /[\u0900-\u097F]/.test(message.content || '') || language === 'hi';
+      speak(message.content, {
+        language: isMsgHindi ? 'hi-IN' : 'en-IN',
       }, message.id);
     },
     [language, speak, speakingMessageId, stopSpeak]
   );
-
-  const toggleVoice = () => {
-    if (voiceOverlayVisible) {
-      disconnectVoice();
-      setVoiceOverlayVisible(false);
-    } else {
-      setVoiceOverlayVisible(true);
-      connectVoice();
-    }
-  };
 
   const handleNewChat = () => {
     if (isStreaming) stopStreaming();
@@ -314,8 +487,11 @@ export default function ChatScreen() {
         </TouchableOpacity>
       </View>
 
+      {/* Server Starting Status Banner with Spinning Icon */}
+      <ServerStartingBanner visible={serverStarting} statusText={serverBannerText} />
+
       {/* Thinking indicator */}
-      <ThinkingBar visible={isStreaming} language={language} />
+      <ThinkingBar visible={isStreaming && !serverStarting} language={language} />
 
       {/* Chat area */}
       <View style={styles.chatContainer}>
@@ -358,13 +534,13 @@ export default function ChatScreen() {
           onSpeak={handleSpeakMessage}
           speakingMessageId={speakingMessageId}
           isLoadingTTS={isLoadingTTS}
+          isStreaming={isStreaming}
         />
       </View>
 
       {/* Input */}
       <InputBar
         onSend={handleSend}
-        onMicPress={toggleVoice}
         onStopStreaming={stopStreaming}
         onPickDocument={selectDocument}
         onPickImage={selectImage}
@@ -375,14 +551,6 @@ export default function ChatScreen() {
         isStreaming={isStreaming}
         language={language}
         placeholder={t('placeholder', language)}
-      />
-
-      <VoiceOverlay
-        visible={voiceOverlayVisible}
-        isListening={isListening || isConnected}
-        transcript={voiceTranscript}
-        onClose={() => { disconnectVoice(); setVoiceOverlayVisible(false); }}
-        onStop={() => { disconnectVoice(); setVoiceOverlayVisible(false); }}
       />
     </SafeAreaView>
   );
@@ -429,6 +597,25 @@ const styles = StyleSheet.create({
   newChatText: { fontSize: 13, fontWeight: '600', color: colors.brand },
   clearBtn: { padding: spacing.sm, borderRadius: radii.md },
   pressed: { opacity: 0.7 },
+
+  // Server Starting Banner
+  serverBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm + 2,
+    backgroundColor: colors.surfaceSunken,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.borderAccent,
+    zIndex: 2,
+  },
+  serverBannerText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: colors.brand,
+    flex: 1,
+  },
 
   // Thinking bar
   thinkingBar: {

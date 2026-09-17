@@ -1,7 +1,11 @@
-import { createWebSocket } from '../api/ws';
 import { APP_CONFIG } from '../constants/config';
 
-export function createVoiceSession(customUrl, options = {}) {
-  const url = customUrl || APP_CONFIG.wsBaseUrl;
-  return createWebSocket(url, options);
+/**
+ * Voice service — creates a voice session by calling the real API endpoints.
+ * The actual voice loop logic is in useVoiceSession hook.
+ * This file is kept for backward compatibility but the WebSocket approach is removed.
+ */
+
+export function getApiBaseUrl() {
+  return APP_CONFIG.apiBaseUrl;
 }
