@@ -7,6 +7,10 @@ const DAEMON_STATUS_URL = 'http://localhost:3333/status';
 const GIST_FILENAME = 'server_registry.json';
 const GITHUB_TOKEN = process.env.EXPO_PUBLIC_GITHUB_TOKEN || '';
 
+export const CLOUD_API_BASE = typeof window !== 'undefined'
+  ? window.location.origin
+  : (process.env.EXPO_PUBLIC_CLOUD_API_URL || 'https://ipr112211.vercel.app');
+
 // Fallback URL (will be overwritten by Gist registry)
 let _resolvedBackendUrl = '';
 let _serverReady = false;
@@ -64,7 +68,30 @@ export async function fetchServerRegistry(forceFresh = false) {
 
     let registry = null;
 
-    // Strategy 1: Local daemon (fastest, 0ms, already monitoring Kaggle + Gist)
+    // Strategy 0: Cloud Serverless API (/api/server/status) — Central API for Web & Mobile
+    try {
+      const cCtrl = new AbortController();
+      const cTimer = setTimeout(() => cCtrl.abort(), 3000);
+      const cResp = await fetch(`${CLOUD_API_BASE}/api/server/status`, {
+        signal: cCtrl.signal,
+        headers: { 'User-Agent': 'AYUSH-IPR-Guardian' },
+      });
+      clearTimeout(cTimer);
+      if (cResp.ok) {
+        const cData = await cResp.json();
+        if (cData?.server_url) {
+          registry = {
+            server_url: cData.server_url,
+            status: cData.status || 'running',
+            started_at: cData.started_at || new Date().toISOString(),
+          };
+        } else if (cData?.status === 'booting') {
+          _serverStatus = 'booting';
+        }
+      }
+    } catch (_) {}
+
+    // Strategy 1: Local daemon (fastest on localhost, 0ms, already monitoring Kaggle + Gist)
     try {
       const dCtrl = new AbortController();
       const dTimer = setTimeout(() => dCtrl.abort(), 1500);
@@ -277,8 +304,9 @@ export const APP_CONFIG = {
 export const API_TIMEOUT_MS = 90000;
 
 /**
- * Trigger the Kaggle server to start via the local auto-start daemon.
- * Returns { triggered, message } or null on failure.
+ * Trigger the Kaggle GPU server to start via Cloud Serverless API or local daemon.
+ * Works from Vercel web app and mobile APK!
+ * Returns { triggered, message, already_running } or null on failure.
  */
 let _triggerInFlight = false;
 export async function triggerServerStart() {
@@ -292,18 +320,109 @@ export async function triggerServerStart() {
     return { triggered: false, already_running: true, message: 'Server is already booting with an active tunnel. Dual session prevented.' };
   }
   _triggerInFlight = true;
+
+  // 1. Try Cloud Serverless API endpoint first (/api/server/start)
+  try {
+    const cResp = await fetch(`${CLOUD_API_BASE}/api/server/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'AYUSH-IPR-App' },
+    });
+    if (cResp.ok) {
+      const cData = await cResp.json();
+      _serverStatus = 'booting';
+      return cData;
+    }
+  } catch (err) {
+    console.warn('[Trigger] Cloud API start note:', err.message);
+  }
+
+  // 2. Fallback to local auto-start daemon (port 3333)
   try {
     const resp = await fetch(`${APP_CONFIG.triggerDaemonUrl}/start`, {
       headers: { 'User-Agent': 'AYUSH-IPR-App' },
     });
     if (resp.ok) {
       const data = await resp.json();
+      _serverStatus = 'booting';
       return data;
     }
   } catch (err) {
-    console.warn('[Trigger] Daemon not reachable:', err.message);
+    console.warn('[Trigger] Local daemon not reachable:', err.message);
   } finally {
-    setTimeout(() => { _triggerInFlight = false; }, 45000);
+    setTimeout(() => { _triggerInFlight = false; }, 30000);
+  }
+  return null;
+}
+
+/**
+ * Shut down the Kaggle GPU worker on demand to conserve GPU quota.
+ */
+export async function triggerServerStop() {
+  // 1. Try Cloud Serverless API endpoint first
+  try {
+    const cResp = await fetch(`${CLOUD_API_BASE}/api/server/stop`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'AYUSH-IPR-App' },
+    });
+    if (cResp.ok) {
+      const cData = await cResp.json();
+      _serverReady = false;
+      _serverStatus = 'offline';
+      _resolvedBackendUrl = '';
+      return cData;
+    }
+  } catch (err) {
+    console.warn('[Stop] Cloud API stop note:', err.message);
+  }
+
+  // 2. Fallback to local daemon
+  try {
+    const resp = await fetch(`${APP_CONFIG.triggerDaemonUrl}/stop`, {
+      headers: { 'User-Agent': 'AYUSH-IPR-App' },
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      _serverReady = false;
+      _serverStatus = 'offline';
+      _resolvedBackendUrl = '';
+      return data;
+    }
+  } catch (err) {
+    console.warn('[Stop] Local daemon stop error:', err.message);
+  }
+  return null;
+}
+
+/**
+ * Fetch live Kaggle kernel terminal logs from Cloud Serverless API.
+ */
+export async function fetchServerLogs() {
+  try {
+    const resp = await fetch(`${CLOUD_API_BASE}/api/server/logs`, {
+      headers: { 'User-Agent': 'AYUSH-IPR-App' },
+    });
+    if (resp.ok) {
+      return await resp.json();
+    }
+  } catch (err) {
+    console.warn('[Logs] Could not fetch server logs:', err.message);
+  }
+  return { logs: [], error: 'Failed to fetch logs' };
+}
+
+/**
+ * Fetch high-level cloud server status.
+ */
+export async function fetchCloudServerStatus() {
+  try {
+    const resp = await fetch(`${CLOUD_API_BASE}/api/server/status`, {
+      headers: { 'User-Agent': 'AYUSH-IPR-App' },
+    });
+    if (resp.ok) {
+      return await resp.json();
+    }
+  } catch (err) {
+    console.warn('[Status] Could not fetch server status:', err.message);
   }
   return null;
 }

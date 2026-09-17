@@ -12,10 +12,11 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Leaf, Plus, Trash2, ArrowRight, Loader2 } from 'lucide-react-native';
+import { Leaf, Plus, Trash2, ArrowRight, Loader2, Terminal } from 'lucide-react-native';
 
 import MessageList from '../../components/chat/MessageList';
 import InputBar from '../../components/chat/InputBar';
+import ServerTerminalModal from '../../components/server/ServerTerminalModal';
 
 import { useChatStore } from '../../store/chatStore';
 import { useSettingsStore } from '../../store/settingsStore';
@@ -187,10 +188,18 @@ export default function ChatScreen() {
     clearFile: clearAttachedFile,
   } = useFileUpload();
 
-  // Server auto-start state
+  // Server auto-start and console state
   const [serverStarting, setServerStarting] = useState(false);
   const [serverBannerText, setServerBannerText] = useState('');
+  const [showTerminal, setShowTerminal] = useState(false);
+  const [serverReady, setServerReady] = useState(false);
   const pendingMessageRef = useRef(null);
+
+  useEffect(() => {
+    fetchServerRegistry().then(reg => {
+      setServerReady(!!reg?.ready);
+    });
+  }, []);
 
   useEffect(() => {
     // Always open a fresh new chat when a new session is initiated
@@ -468,15 +477,31 @@ function detectQueryLanguage(text) {
 
       {/* Header */}
       <View style={styles.header}>
-        <Pressable
-          style={({ pressed }) => [styles.newChatBtn, pressed && styles.pressed]}
-          onPress={handleNewChat}
-          accessibilityRole="button"
-          accessibilityLabel="New conversation"
-        >
-          <Plus size={14} color={colors.brand} strokeWidth={2.5} />
-          <Text style={styles.newChatText}>{t('newChat', language)}</Text>
-        </Pressable>
+        <View style={styles.headerLeftActions}>
+          <Pressable
+            style={({ pressed }) => [styles.newChatBtn, pressed && styles.pressed]}
+            onPress={handleNewChat}
+            accessibilityRole="button"
+            accessibilityLabel="New conversation"
+          >
+            <Plus size={14} color={colors.brand} strokeWidth={2.5} />
+            <Text style={styles.newChatText}>{t('newChat', language)}</Text>
+          </Pressable>
+
+          <TouchableOpacity
+            style={styles.serverChip}
+            onPress={() => setShowTerminal(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Open Server Console"
+          >
+            <View style={[styles.serverDot, serverReady ? styles.serverDotOnline : styles.serverDotOffline]} />
+            <Terminal size={13} color={colors.brand} style={{ marginRight: 4 }} />
+            <Text style={styles.serverChipText}>
+              {serverReady ? 'Dual T4: Online' : 'GPU: Console'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
         <TouchableOpacity
           style={styles.clearBtn}
           onPress={clearMessages}
@@ -552,6 +577,12 @@ function detectQueryLanguage(text) {
         language={language}
         placeholder={t('placeholder', language)}
       />
+
+      {/* Kaggle Dual T4 Server Terminal Modal */}
+      <ServerTerminalModal
+        visible={showTerminal}
+        onClose={() => setShowTerminal(false)}
+      />
     </SafeAreaView>
   );
 }
@@ -595,6 +626,38 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceRaised,
   },
   newChatText: { fontSize: 13, fontWeight: '600', color: colors.brand },
+  headerLeftActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  serverChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.sm + 2,
+    paddingVertical: spacing.xs + 2,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
+  },
+  serverDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    marginRight: 5,
+  },
+  serverDotOnline: {
+    backgroundColor: '#10B981',
+  },
+  serverDotOffline: {
+    backgroundColor: '#94A3B8',
+  },
+  serverChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.textPrimary,
+  },
   clearBtn: { padding: spacing.sm, borderRadius: radii.md },
   pressed: { opacity: 0.7 },
 
