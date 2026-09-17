@@ -2,9 +2,9 @@ import { APP_CONFIG } from '../constants/config';
 import { useAuthStore } from '../store/authStore';
 
 /**
- * Clean Markdown into natural spoken prose.
- * Converts markdown headers, bold/italics, bullet lists, citations,
- * and legal abbreviations into clear, natural spoken text.
+ * Clean Markdown and legal texts into natural, clear spoken prose.
+ * Expands legal citations (e.g. Novartis v. Union of India -> Novartis versus Union of India),
+ * cleans bullet points, numbered lists, section symbols, and collapses stray punctuation.
  */
 export function cleanTextForSpeech(raw) {
   if (!raw) return '';
@@ -18,16 +18,19 @@ export function cleanTextForSpeech(raw) {
     .replace(/\[[0-9]+\]/g, '') // Citations [1], [2] -> empty
     .replace(/\[(?:TKDL|Ref|Citation|Vol)[^\]]*\]/gi, '') // Brackets like [TKDL: ...] -> empty
     .replace(/`{1,3}[^`]*`{1,3}/g, '') // Code blocks
-    .replace(/^[*\-+]\s+/gm, '') // List bullets
+    .replace(/^[*\-+•▪▫–—✦★✓\t ]+/gm, '') // List bullets at line start
+    .replace(/[•▪▫✦★✓]/g, ' ') // Any standalone bullet symbols
     .replace(/^([0-9]+)\.\s+/gm, 'Point $1: ') // Numbered lists: 1. -> Point 1:
     .replace(/[§]/g, 'Section ') // Symbol § -> Section
     .replace(/\bSec\.\s*/gi, 'Section ') // Sec. -> Section
+    .replace(/\bv\.\s+/gi, 'versus ') // Legal citations: Novartis v. Union of India -> Novartis versus Union of India
+    .replace(/\bvs\.\s*/gi, 'versus ') // vs. -> versus
     .replace(/\be\.g\.,?\s*/gi, 'for example, ') // e.g. -> for example
     .replace(/\bi\.e\.,?\s*/gi, 'that is, ') // i.e. -> that is
-    .replace(/\bvs\.\s*/gi, 'versus ') // vs. -> versus
     .replace(/\bw\.r\.t\.\s*/gi, 'with respect to ')
     .replace(/---|\*\*\*|___/g, '') // Dividers
     .replace(/[\r\n]+/g, '. ') // Line breaks -> periods
+    .replace(/[:;]\s*\./g, '.') // e.g. ":." -> "."
     .replace(/\.{2,}/g, '.') // Double periods -> single period
     .replace(/\s+/g, ' ') // Collapse whitespace
     .trim();
@@ -35,9 +38,9 @@ export function cleanTextForSpeech(raw) {
 
 /**
  * Split cleaned text into coherent, natural sentences for speech synthesis.
- * Chunks at sentence boundaries (. ! ? or Hindi ।) up to maxChars (350 chars).
+ * Chunks at sentence boundaries (. ! ? or Hindi ।) up to maxChars (320 chars).
  */
-export function splitIntoSpokenChunks(cleanText, maxChars = 350) {
+export function splitIntoSpokenChunks(cleanText, maxChars = 320) {
   if (!cleanText) return [];
   const sentences = cleanText.split(/(?<=[.!?।])\s+/);
   const chunks = [];
@@ -74,7 +77,6 @@ let _currentAudio = null;
 let _isSpeakingBrowser = false;
 let _userCancelled = false;
 let _chromeHeartbeatTimer = null;
-let _chunkWatchdogTimer = null;
 
 // Global array anchored on window to prevent V8 garbage-collecting in-flight SpeechSynthesisUtterance objects
 if (typeof window !== 'undefined') {
@@ -83,7 +85,7 @@ if (typeof window !== 'undefined') {
 
 function startChromeHeartbeat() {
   stopChromeHeartbeat();
-  // Call resume() without pause() every 3.5 seconds to keep Chromium speech thread active
+  // Call resume() every 3.5 seconds without pausing to keep Chromium speech thread alive
   _chromeHeartbeatTimer = setInterval(() => {
     if (typeof window !== 'undefined' && window.speechSynthesis) {
       if (window.speechSynthesis.speaking && !window.speechSynthesis.paused) {
@@ -97,13 +99,6 @@ function stopChromeHeartbeat() {
   if (_chromeHeartbeatTimer) {
     clearInterval(_chromeHeartbeatTimer);
     _chromeHeartbeatTimer = null;
-  }
-}
-
-function clearWatchdog() {
-  if (_chunkWatchdogTimer) {
-    clearTimeout(_chunkWatchdogTimer);
-    _chunkWatchdogTimer = null;
   }
 }
 
@@ -124,7 +119,7 @@ export async function speakText(text, options = {}) {
 
   // In web browsers, native SpeechSynthesis gives instant, zero-latency, full-length playback
   if (typeof window !== 'undefined' && window.speechSynthesis) {
-    speakBrowserText(cleaned, options);
+    await speakBrowserText(cleaned, options);
     return;
   }
 
@@ -185,23 +180,89 @@ export async function speakText(text, options = {}) {
 }
 
 /**
+ * Single utterance Promise with watchdog timer and GC protection.
+ */
+function speakSingleChunk(chunk, targetLang, selectedVoice, options) {
+  return new Promise((resolve) => {
+    if (!_isSpeakingBrowser || _userCancelled) {
+      resolve();
+      return;
+    }
+
+    if (typeof window === 'undefined' || !window.speechSynthesis) {
+      resolve();
+      return;
+    }
+
+    if (window.speechSynthesis.paused) {
+      window.speechSynthesis.resume();
+    }
+
+    const utterance = new SpeechSynthesisUtterance(chunk);
+    utterance.lang = targetLang;
+    if (selectedVoice) utterance.voice = selectedVoice;
+    utterance.rate = options.rate || 1.0;
+    utterance.pitch = options.pitch || 1.0;
+
+    // Anchor to window so V8 never garbage-collects it during playback
+    window._activeSpeechUtterances = [utterance];
+
+    let settled = false;
+    let watchdog = null;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (watchdog) clearTimeout(watchdog);
+      resolve();
+    };
+
+    utterance.onend = () => {
+      finish();
+    };
+
+    utterance.onerror = (e) => {
+      if (_userCancelled || e.error === 'canceled') {
+        _isSpeakingBrowser = false;
+        finish();
+      } else {
+        console.warn(`[TTS] Notice on chunk: ${e?.error || 'unknown'}. Advancing.`);
+        finish();
+      }
+    };
+
+    // Watchdog timer: automatically advances if Chromium drops onend
+    const wordCount = chunk.split(/\s+/).filter(Boolean).length;
+    const timeoutMs = Math.max(3000, wordCount * 550 + 3500);
+    watchdog = setTimeout(() => {
+      if (!settled) {
+        console.warn(`[TTS] Watchdog advancing chunk after ${timeoutMs}ms`);
+        finish();
+      }
+    }, timeoutMs);
+
+    window.speechSynthesis.speak(utterance);
+  });
+}
+
+/**
  * Universal sequential sentence-by-sentence SpeechSynthesis for Web.
  * Reads the ENTIRE message completely, across all paragraphs, without cutting off.
  */
-function speakBrowserText(cleanText, options = {}) {
+async function speakBrowserText(cleanText, options = {}) {
   if (typeof window === 'undefined' || !window.speechSynthesis) {
     options.onError?.(new Error('Speech synthesis not supported.'));
     return;
   }
 
-  // Cancel any existing utterance
+  // Cancel any existing utterance and reset state
   window.speechSynthesis.cancel();
   window.speechSynthesis.resume();
 
   const isHindi = /[\u0900-\u097F]/.test(cleanText);
   const targetLang = isHindi ? 'hi-IN' : (options.language || 'en-IN');
 
-  const chunks = splitIntoSpokenChunks(cleanText, 350);
+  const chunks = splitIntoSpokenChunks(cleanText, 320);
   if (chunks.length === 0) return;
 
   const voices = window.speechSynthesis.getVoices();
@@ -210,89 +271,31 @@ function speakBrowserText(cleanText, options = {}) {
     : voices.find((v) => v.lang === 'en-IN' || (v.lang.startsWith('en') && (v.name.includes('India') || v.name.includes('Google') || v.name.includes('Natural'))))
       || voices.find((v) => v.lang.startsWith('en'));
 
-  let currentIndex = 0;
   _isSpeakingBrowser = true;
   _userCancelled = false;
-
-  if (typeof window !== 'undefined') {
-    window._activeSpeechUtterances = [];
-  }
 
   startChromeHeartbeat();
   options.onLoadingEnd?.();
   options.onStart?.();
 
-  function speakNext() {
-    clearWatchdog();
-
-    if (!_isSpeakingBrowser || _userCancelled) {
-      stopSpeaking();
+  try {
+    for (let i = 0; i < chunks.length; i++) {
+      if (!_isSpeakingBrowser || _userCancelled) {
+        break;
+      }
+      await speakSingleChunk(chunks[i], targetLang, selectedVoice, options);
+    }
+  } catch (err) {
+    console.warn('[TTS] Playback loop caught error:', err);
+  } finally {
+    const wasCancelled = _userCancelled;
+    stopSpeaking();
+    if (wasCancelled) {
       options.onStopped?.();
-      return;
-    }
-
-    if (currentIndex >= chunks.length) {
-      _isSpeakingBrowser = false;
-      stopChromeHeartbeat();
-      if (typeof window !== 'undefined') {
-        window._activeSpeechUtterances = [];
-      }
+    } else {
       options.onDone?.();
-      return;
     }
-
-    const chunk = chunks[currentIndex];
-    const utterance = new SpeechSynthesisUtterance(chunk);
-    utterance.lang = targetLang;
-    if (selectedVoice) utterance.voice = selectedVoice;
-    utterance.rate = options.rate || 1.0;
-    utterance.pitch = options.pitch || 1.0;
-
-    // Anchor utterance to prevent V8 garbage collection
-    if (typeof window !== 'undefined') {
-      window._activeSpeechUtterances.push(utterance);
-    }
-
-    let hasHandledEnd = false;
-    const advanceToNext = () => {
-      if (hasHandledEnd) return;
-      hasHandledEnd = true;
-      clearWatchdog();
-      currentIndex++;
-      speakNext();
-    };
-
-    utterance.onend = () => {
-      advanceToNext();
-    };
-
-    utterance.onerror = (e) => {
-      if (_userCancelled || e.error === 'canceled') {
-        _isSpeakingBrowser = false;
-        stopChromeHeartbeat();
-        clearWatchdog();
-        options.onStopped?.();
-      } else {
-        // For non-user interruptions (e.g. browser audio switch), seamlessly advance to next chunk
-        console.warn(`[TTS] Chunk ${currentIndex} notice: ${e.error}. Advancing.`);
-        advanceToNext();
-      }
-    };
-
-    // Watchdog timer: If browser drops onend (Chromium bug), auto-advance
-    const wordCount = chunk.split(/\s+/).length;
-    const expectedDurationMs = Math.max(3000, wordCount * 550 + 3500);
-    _chunkWatchdogTimer = setTimeout(() => {
-      if (_isSpeakingBrowser && !hasHandledEnd) {
-        console.warn(`[TTS] Watchdog advancing stalled chunk ${currentIndex}`);
-        advanceToNext();
-      }
-    }, expectedDurationMs);
-
-    window.speechSynthesis.speak(utterance);
   }
-
-  speakNext();
 }
 
 /**
@@ -302,7 +305,6 @@ export function stopSpeaking() {
   _isSpeakingBrowser = false;
   _userCancelled = true;
   stopChromeHeartbeat();
-  clearWatchdog();
 
   if (typeof window !== 'undefined') {
     window._activeSpeechUtterances = [];
