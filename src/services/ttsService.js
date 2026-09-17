@@ -3,18 +3,20 @@ import { useAuthStore } from '../store/authStore';
 
 /**
  * Clean Markdown into natural spoken prose.
- * Expands legal citations, symbols, and abbreviations so speech engines pronounce them smoothly.
+ * Converts markdown headers, bold/italics, bullet lists, citations,
+ * and legal abbreviations into clear, natural spoken text.
  */
 export function cleanTextForSpeech(raw) {
   if (!raw) return '';
   return raw
-    .replace(/^#+\s+/gm, '') // Remove markdown headers #, ##, ###
+    .replace(/^#+\s*(.+)$/gm, '$1. ') // Markdown headers -> full sentence
     .replace(/\*\*([^*]+)\*\*/g, '$1') // Bold **text** -> text
     .replace(/\*([^*]+)\*/g, '$1') // Italic *text* -> text
     .replace(/__([^_]+)__/g, '$1') // Bold __text__ -> text
     .replace(/_([^_]+)_/g, '$1') // Italic _text_ -> text
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Links [text](url) -> text
     .replace(/\[[0-9]+\]/g, '') // Citations [1], [2] -> empty
+    .replace(/\[(?:TKDL|Ref|Citation|Vol)[^\]]*\]/gi, '') // Brackets like [TKDL: ...] -> empty
     .replace(/`{1,3}[^`]*`{1,3}/g, '') // Code blocks
     .replace(/^[*\-+]\s+/gm, '') // List bullets
     .replace(/^([0-9]+)\.\s+/gm, 'Point $1: ') // Numbered lists: 1. -> Point 1:
@@ -23,26 +25,72 @@ export function cleanTextForSpeech(raw) {
     .replace(/\be\.g\.,?\s*/gi, 'for example, ') // e.g. -> for example
     .replace(/\bi\.e\.,?\s*/gi, 'that is, ') // i.e. -> that is
     .replace(/\bvs\.\s*/gi, 'versus ') // vs. -> versus
+    .replace(/\bw\.r\.t\.\s*/gi, 'with respect to ')
+    .replace(/---|\*\*\*|___/g, '') // Dividers
     .replace(/[\r\n]+/g, '. ') // Line breaks -> periods
     .replace(/\.{2,}/g, '.') // Double periods -> single period
     .replace(/\s+/g, ' ') // Collapse whitespace
     .trim();
 }
 
+/**
+ * Split cleaned text into coherent, natural sentences for speech synthesis.
+ * Chunks at sentence boundaries (. ! ? or Hindi ।) up to maxChars (350 chars).
+ */
+export function splitIntoSpokenChunks(cleanText, maxChars = 350) {
+  if (!cleanText) return [];
+  const sentences = cleanText.split(/(?<=[.!?।])\s+/);
+  const chunks = [];
+  let current = '';
+
+  for (const sentence of sentences) {
+    const trimmed = sentence.trim();
+    if (!trimmed) continue;
+
+    if (trimmed.length > maxChars) {
+      const clauses = trimmed.split(/(?<=[,;:\-])\s+/);
+      for (const clause of clauses) {
+        const ct = clause.trim();
+        if (!ct) continue;
+        if ((current + ' ' + ct).length <= maxChars) {
+          current = current ? current + ' ' + ct : ct;
+        } else {
+          if (current) chunks.push(current.trim());
+          current = ct;
+        }
+      }
+    } else if ((current + ' ' + trimmed).length <= maxChars) {
+      current = current ? current + ' ' + trimmed : trimmed;
+    } else {
+      if (current) chunks.push(current.trim());
+      current = trimmed;
+    }
+  }
+  if (current) chunks.push(current.trim());
+  return chunks;
+}
+
 let _currentAudio = null;
 let _isSpeakingBrowser = false;
-// Global set to retain active utterances and prevent Chromium GC bug
-const _activeUtterancePool = new Set();
+let _userCancelled = false;
 let _chromeHeartbeatTimer = null;
+let _chunkWatchdogTimer = null;
+
+// Global array anchored on window to prevent V8 garbage-collecting in-flight SpeechSynthesisUtterance objects
+if (typeof window !== 'undefined') {
+  window._activeSpeechUtterances = window._activeSpeechUtterances || [];
+}
 
 function startChromeHeartbeat() {
   stopChromeHeartbeat();
+  // Call resume() without pause() every 3.5 seconds to keep Chromium speech thread active
   _chromeHeartbeatTimer = setInterval(() => {
-    if (typeof window !== 'undefined' && window.speechSynthesis && window.speechSynthesis.speaking) {
-      window.speechSynthesis.pause();
-      window.speechSynthesis.resume();
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      if (window.speechSynthesis.speaking && !window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      }
     }
-  }, 10000);
+  }, 3500);
 }
 
 function stopChromeHeartbeat() {
@@ -52,35 +100,45 @@ function stopChromeHeartbeat() {
   }
 }
 
+function clearWatchdog() {
+  if (_chunkWatchdogTimer) {
+    clearTimeout(_chunkWatchdogTimer);
+    _chunkWatchdogTimer = null;
+  }
+}
+
 /**
- * Speak text using Browser Native SpeechSynthesis (Web) or Audio Player.
- * @param {string} text - Text to speak
- * @param {Object} options - { language, rate, pitch, onStart, onDone, onStopped, onError, onLoadingStart, onLoadingEnd }
+ * Speak text using high-reliability Browser Native SpeechSynthesis (Web) or fallback.
  */
 export async function speakText(text, options = {}) {
   if (!text || !text.trim()) return;
 
-  // Always stop previous speech before starting
+  // Always cancel any previous speech
   stopSpeaking();
+  _userCancelled = false;
 
   const cleaned = cleanTextForSpeech(text);
   if (!cleaned) return;
 
   const { onStart, onDone, onStopped, onError, onLoadingStart, onLoadingEnd } = options;
 
-  // Detect Hindi: check for Devanagari Unicode characters or explicit Hindi option
-  const isHindi = /[\u0900-\u097F]/.test(cleaned) || options.language === 'hi' || options.language === 'hi-IN';
-  const apiLang = isHindi ? 'hi' : 'en';
+  // In web browsers, native SpeechSynthesis gives instant, zero-latency, full-length playback
+  if (typeof window !== 'undefined' && window.speechSynthesis) {
+    speakBrowserText(cleaned, options);
+    return;
+  }
 
-  if (onLoadingStart) onLoadingStart();
-
-  // 1. Try OmniVoice Neural TTS if available
+  // Fallback for non-browser / mobile audio player if backend is available
   try {
+    if (onLoadingStart) onLoadingStart();
+    const isHindi = /[\u0900-\u097F]/.test(cleaned) || options.language === 'hi' || options.language === 'hi-IN';
+    const apiLang = isHindi ? 'hi' : 'en';
+
     const ttsUrl = `${APP_CONFIG.apiBaseUrl}/tts`;
     const token = useAuthStore.getState().accessToken;
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 4000); // Fast 4s timeout for fallback
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
 
     const response = await fetch(ttsUrl, {
       method: 'POST',
@@ -92,16 +150,13 @@ export async function speakText(text, options = {}) {
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: JSON.stringify({
-        text: cleaned.substring(0, 1000),
+        text: cleaned,
         language: apiLang,
       }),
     });
 
     clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      throw new Error(`OmniVoice server returned HTTP ${response.status}`);
-    }
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
     const audioBlob = await response.blob();
     const audioUrl = URL.createObjectURL(audioBlob);
@@ -110,108 +165,78 @@ export async function speakText(text, options = {}) {
     const audio = new Audio(audioUrl);
     _currentAudio = audio;
 
-    audio.onplay = () => {
-      if (onStart) onStart();
-    };
-
+    audio.onplay = () => onStart?.();
     audio.onended = () => {
       _currentAudio = null;
       URL.revokeObjectURL(audioUrl);
-      if (onDone) onDone();
+      onDone?.();
     };
-
     audio.onerror = (err) => {
       _currentAudio = null;
       URL.revokeObjectURL(audioUrl);
-      if (onError) onError(err);
+      onError?.(err);
     };
 
     await audio.play();
-    return; // Successfully played OmniVoice audio
-  } catch (backendErr) {
+  } catch (err) {
     if (onLoadingEnd) onLoadingEnd();
-
-    // 2. High-reliability Browser native SpeechSynthesis
-    if (typeof window !== 'undefined' && window.speechSynthesis) {
-      speakBrowserText(cleaned, options);
-      return;
-    }
-
-    if (onError) onError(backendErr);
+    onError?.(err);
   }
 }
 
 /**
- * Universal chunked SpeechSynthesis for Web
- * Fixes Chromium garbage-collection defect and long-utterance freeze bug.
+ * Universal sequential sentence-by-sentence SpeechSynthesis for Web.
+ * Reads the ENTIRE message completely, across all paragraphs, without cutting off.
  */
 function speakBrowserText(cleanText, options = {}) {
   if (typeof window === 'undefined' || !window.speechSynthesis) {
-    options.onError?.(new Error('Speech synthesis not available in this browser.'));
+    options.onError?.(new Error('Speech synthesis not supported.'));
     return;
   }
 
+  // Cancel any existing utterance
   window.speechSynthesis.cancel();
   window.speechSynthesis.resume();
 
-  // Detect Devanagari characters
   const isHindi = /[\u0900-\u097F]/.test(cleanText);
   const targetLang = isHindi ? 'hi-IN' : (options.language || 'en-IN');
 
-  // Split text by punctuation marks that are followed by a space or end of string
-  // Prevents splitting within numbers like 3.5 or legal terms like 3(p)
-  const rawSegments = cleanText.split(/(?<=[.!?।])\s+/);
-  const chunks = [];
-  let current = '';
-
-  for (const seg of rawSegments) {
-    const trimmed = seg.trim();
-    if (!trimmed) continue;
-
-    if (trimmed.length > 200) {
-      // Long clause: split further at commas or semicolons
-      const subParts = trimmed.split(/(?<=[,;])\s+/);
-      for (const sp of subParts) {
-        if ((current + ' ' + sp).length <= 200) {
-          current = current ? current + ' ' + sp : sp;
-        } else {
-          if (current) chunks.push(current);
-          current = sp;
-        }
-      }
-    } else if ((current + ' ' + trimmed).length <= 200) {
-      current = current ? current + ' ' + trimmed : trimmed;
-    } else {
-      if (current) chunks.push(current);
-      current = trimmed;
-    }
-  }
-  if (current) chunks.push(current);
-
+  const chunks = splitIntoSpokenChunks(cleanText, 350);
   if (chunks.length === 0) return;
 
   const voices = window.speechSynthesis.getVoices();
   const selectedVoice = isHindi
     ? voices.find((v) => v.lang.startsWith('hi') || v.name.toLowerCase().includes('hindi'))
-    : voices.find((v) => v.lang === 'en-IN' || (v.lang.startsWith('en') && !v.name.includes('David')));
+    : voices.find((v) => v.lang === 'en-IN' || (v.lang.startsWith('en') && (v.name.includes('India') || v.name.includes('Google') || v.name.includes('Natural'))))
+      || voices.find((v) => v.lang.startsWith('en'));
 
   let currentIndex = 0;
   _isSpeakingBrowser = true;
-  _activeUtterancePool.clear();
+  _userCancelled = false;
+
+  if (typeof window !== 'undefined') {
+    window._activeSpeechUtterances = [];
+  }
+
   startChromeHeartbeat();
+  options.onLoadingEnd?.();
   options.onStart?.();
 
   function speakNext() {
-    if (!_isSpeakingBrowser) {
-      stopChromeHeartbeat();
-      _activeUtterancePool.clear();
+    clearWatchdog();
+
+    if (!_isSpeakingBrowser || _userCancelled) {
+      stopSpeaking();
+      options.onStopped?.();
       return;
     }
 
     if (currentIndex >= chunks.length) {
       _isSpeakingBrowser = false;
       stopChromeHeartbeat();
-      _activeUtterancePool.clear();
+      if (typeof window !== 'undefined') {
+        window._activeSpeechUtterances = [];
+      }
       options.onDone?.();
       return;
     }
@@ -223,28 +248,46 @@ function speakBrowserText(cleanText, options = {}) {
     utterance.rate = options.rate || 1.0;
     utterance.pitch = options.pitch || 1.0;
 
-    // CRITICAL: Prevent garbage collection in Chrome/Edge V8
-    _activeUtterancePool.add(utterance);
+    // Anchor utterance to prevent V8 garbage collection
+    if (typeof window !== 'undefined') {
+      window._activeSpeechUtterances.push(utterance);
+    }
 
-    utterance.onend = () => {
-      _activeUtterancePool.delete(utterance);
+    let hasHandledEnd = false;
+    const advanceToNext = () => {
+      if (hasHandledEnd) return;
+      hasHandledEnd = true;
+      clearWatchdog();
       currentIndex++;
       speakNext();
     };
 
+    utterance.onend = () => {
+      advanceToNext();
+    };
+
     utterance.onerror = (e) => {
-      _activeUtterancePool.delete(utterance);
-      if (e.error === 'interrupted' || e.error === 'canceled') {
+      if (_userCancelled || e.error === 'canceled') {
         _isSpeakingBrowser = false;
         stopChromeHeartbeat();
+        clearWatchdog();
         options.onStopped?.();
       } else {
-        console.warn('[TTS] Utterance error:', e);
-        // Continue to next chunk even if an individual utterance errored
-        currentIndex++;
-        speakNext();
+        // For non-user interruptions (e.g. browser audio switch), seamlessly advance to next chunk
+        console.warn(`[TTS] Chunk ${currentIndex} notice: ${e.error}. Advancing.`);
+        advanceToNext();
       }
     };
+
+    // Watchdog timer: If browser drops onend (Chromium bug), auto-advance
+    const wordCount = chunk.split(/\s+/).length;
+    const expectedDurationMs = Math.max(3000, wordCount * 550 + 3500);
+    _chunkWatchdogTimer = setTimeout(() => {
+      if (_isSpeakingBrowser && !hasHandledEnd) {
+        console.warn(`[TTS] Watchdog advancing stalled chunk ${currentIndex}`);
+        advanceToNext();
+      }
+    }, expectedDurationMs);
 
     window.speechSynthesis.speak(utterance);
   }
@@ -257,25 +300,25 @@ function speakBrowserText(cleanText, options = {}) {
  */
 export function stopSpeaking() {
   _isSpeakingBrowser = false;
+  _userCancelled = true;
   stopChromeHeartbeat();
-  _activeUtterancePool.clear();
+  clearWatchdog();
+
+  if (typeof window !== 'undefined') {
+    window._activeSpeechUtterances = [];
+    if (window.speechSynthesis) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch (_) {}
+    }
+  }
 
   if (_currentAudio) {
     try {
       _currentAudio.pause();
       _currentAudio.currentTime = 0;
       _currentAudio = null;
-    } catch (err) {
-      console.warn('[TTS] Audio pause error:', err);
-    }
-  }
-
-  if (typeof window !== 'undefined' && window.speechSynthesis) {
-    try {
-      window.speechSynthesis.cancel();
-    } catch (err) {
-      console.warn('[TTS] Synthesis cancel error:', err);
-    }
+    } catch (_) {}
   }
 }
 
