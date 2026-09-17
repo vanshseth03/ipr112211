@@ -1,15 +1,17 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { StyleSheet, Text, View, Animated, Easing, Platform, ActivityIndicator } from 'react-native';
-import { Leaf, Cpu } from 'lucide-react-native';
+import { Leaf, Cpu, Clock, Info, Zap } from 'lucide-react-native';
 import { colors, radii, spacing, typography } from '../../constants/theme';
 
 /**
  * Server Boot & Model Loading Card
- * Displays animated loading spinner with live state text beneath it,
- * reflecting exact progress from /api/health (loading weights, FAISS, etc.).
+ * Displays animated loading spinner with live state text,
+ * real-time seconds counter (up to ~250s), progress bar,
+ * and transparent notice explaining the free Kaggle instance vs production.
  */
 function ServerBootCard({ step, stepDisplay, url }) {
   const pulseAnim = useRef(new Animated.Value(0.4)).current;
+  const [seconds, setSeconds] = useState(0);
 
   useEffect(() => {
     const pulse = Animated.loop(
@@ -23,6 +25,17 @@ function ServerBootCard({ step, stepDisplay, url }) {
       pulse.stop();
     };
   }, [pulseAnim]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setSeconds((prev) => prev + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const TOTAL_ESTIMATED_SECS = 250;
+  const progressPercent = Math.min(Math.round((seconds / TOTAL_ESTIMATED_SECS) * 100), 98);
+  const remainingSecs = Math.max(0, TOTAL_ESTIMATED_SECS - seconds);
 
   // Interpret boot phase
   let phaseTitle = 'Initializing AI Server';
@@ -57,6 +70,25 @@ function ServerBootCard({ step, stepDisplay, url }) {
 
   return (
     <View style={styles.bootCard}>
+      {/* Real-time Seconds Timer & Progress Section */}
+      <View style={styles.bootTimerSection}>
+        <View style={styles.bootTimerHeader}>
+          <View style={styles.bootTimerBadge}>
+            <Clock size={13} color={colors.brand} strokeWidth={2.5} />
+            <Text style={styles.bootTimerCount}>{seconds}s</Text>
+            <Text style={styles.bootTimerTotal}>/ ~250s estimated</Text>
+          </View>
+          <Text style={styles.bootRemainingText}>
+            {remainingSecs > 0 ? `~${remainingSecs}s remaining` : 'Finalizing connection...'}
+          </Text>
+        </View>
+
+        {/* Visual Progress Bar Track */}
+        <View style={styles.bootProgressBarTrack}>
+          <View style={[styles.bootProgressBarFill, { width: `${progressPercent}%` }]} />
+        </View>
+      </View>
+
       {/* Centered Loading Icon with Glowing Ring */}
       <View style={styles.bootIconContainer}>
         <ActivityIndicator size="large" color={colors.brand} />
@@ -78,6 +110,25 @@ function ServerBootCard({ step, stepDisplay, url }) {
         <View style={styles.bootChip}>
           <Cpu size={12} color={colors.brand} strokeWidth={2} />
           <Text style={styles.bootChipText}>Kaggle Dual T4 (32GB VRAM)</Text>
+        </View>
+      </View>
+
+      {/* Free Kaggle Instance vs Production Explanation */}
+      <View style={styles.bootExplanationBox}>
+        <View style={styles.bootExplanationHeader}>
+          <Info size={13} color={colors.brand} strokeWidth={2} />
+          <Text style={styles.bootExplanationTitle}>
+            Why does startup take ~250 seconds?
+          </Text>
+        </View>
+        <Text style={styles.bootExplanationBody}>
+          To avoid 24/7 idle hosting costs, this application runs on a <Text style={styles.bootBoldText}>free on-demand Kaggle GPU instance (Dual Tesla T4)</Text>. Kaggle allocates a fresh container, downloads model weights (Gemma-2 & BGE), and establishes the secure tunnel from scratch each time.
+        </Text>
+        <View style={styles.bootProductionBadge}>
+          <Zap size={13} color={colors.accent || '#10b981'} strokeWidth={2.5} />
+          <Text style={styles.bootProductionText}>
+            <Text style={styles.bootBoldText}>In Production:</Text> Dedicated warm GPU servers run 24/7 with zero startup delay—this wait does not happen in production.
+          </Text>
         </View>
       </View>
 
@@ -456,5 +507,97 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 15,
     marginTop: spacing.xs,
+  },
+  bootTimerSection: {
+    width: '100%',
+    backgroundColor: colors.surfaceSunken,
+    borderRadius: radii.md,
+    padding: spacing.sm,
+    marginBottom: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  bootTimerHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  bootTimerBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  bootTimerCount: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.brand,
+  },
+  bootTimerTotal: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: colors.textMuted,
+  },
+  bootRemainingText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: colors.brandLight || colors.brand,
+  },
+  bootProgressBarTrack: {
+    width: '100%',
+    height: 6,
+    backgroundColor: colors.border,
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  bootProgressBarFill: {
+    height: '100%',
+    backgroundColor: colors.brand,
+    borderRadius: 3,
+  },
+  bootExplanationBox: {
+    width: '100%',
+    backgroundColor: colors.surfaceSunken,
+    borderRadius: radii.md,
+    padding: spacing.sm,
+    marginTop: spacing.xs,
+    marginBottom: spacing.xs,
+    borderLeftWidth: 3,
+    borderLeftColor: colors.brand,
+  },
+  bootExplanationHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 4,
+  },
+  bootExplanationTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textPrimary || colors.text,
+  },
+  bootExplanationBody: {
+    fontSize: 11,
+    lineHeight: 16,
+    color: colors.textSecondary,
+    marginBottom: 6,
+  },
+  bootProductionBadge: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 5,
+    backgroundColor: colors.surfaceRaised || colors.surface,
+    padding: 6,
+    borderRadius: radii.sm,
+  },
+  bootProductionText: {
+    flex: 1,
+    fontSize: 11,
+    lineHeight: 15,
+    color: colors.textSecondary,
+  },
+  bootBoldText: {
+    fontWeight: '700',
+    color: colors.textPrimary || colors.text,
   },
 });

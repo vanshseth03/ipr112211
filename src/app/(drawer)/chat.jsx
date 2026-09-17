@@ -12,11 +12,10 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Leaf, Plus, Trash2, ArrowRight, Loader2, Terminal } from 'lucide-react-native';
+import { Leaf, Plus, Trash2, ArrowRight, Loader2, Clock, Info, Cpu } from 'lucide-react-native';
 
 import MessageList from '../../components/chat/MessageList';
 import InputBar from '../../components/chat/InputBar';
-import ServerTerminalModal from '../../components/server/ServerTerminalModal';
 
 import { useChatStore } from '../../store/chatStore';
 import { useSettingsStore } from '../../store/settingsStore';
@@ -115,14 +114,38 @@ function FloatingLeaf({ delay = 0 }) {
 
 // ─── Server Starting Banner ──────────────────────────────────
 function ServerStartingBanner({ visible, statusText }) {
+  const [seconds, setSeconds] = useState(0);
+
+  useEffect(() => {
+    if (!visible) {
+      setSeconds(0);
+      return;
+    }
+    const timer = setInterval(() => {
+      setSeconds((prev) => prev + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [visible]);
+
   if (!visible) return null;
 
   return (
     <View style={styles.serverBanner}>
-      <ActivityIndicator size="small" color={colors.brand} style={{ marginRight: 8 }} />
-      <Text style={styles.serverBannerText}>
-        {statusText || 'Starting server — loading AI models, please wait...'}
-      </Text>
+      <ActivityIndicator size="small" color={colors.brand} style={{ marginRight: 10 }} />
+      <View style={styles.serverBannerContent}>
+        <View style={styles.serverBannerTopRow}>
+          <Text style={styles.serverBannerText}>
+            {statusText || 'Starting server — loading AI models, please wait...'}
+          </Text>
+          <View style={styles.serverBannerTimerBadge}>
+            <Clock size={11} color={colors.brand} style={{ marginRight: 3 }} />
+            <Text style={styles.serverBannerTimerText}>{seconds}s / ~250s</Text>
+          </View>
+        </View>
+        <Text style={styles.serverBannerExplainer}>
+          Free Kaggle instance cold-boot takes ~250s. In production with 24/7 dedicated servers, this startup delay does not happen.
+        </Text>
+      </View>
     </View>
   );
 }
@@ -188,10 +211,9 @@ export default function ChatScreen() {
     clearFile: clearAttachedFile,
   } = useFileUpload();
 
-  // Server auto-start and console state
+  // Server auto-start state
   const [serverStarting, setServerStarting] = useState(false);
   const [serverBannerText, setServerBannerText] = useState('');
-  const [showTerminal, setShowTerminal] = useState(false);
   const [serverReady, setServerReady] = useState(false);
   const pendingMessageRef = useRef(null);
 
@@ -488,18 +510,26 @@ function detectQueryLanguage(text) {
             <Text style={styles.newChatText}>{t('newChat', language)}</Text>
           </Pressable>
 
-          <TouchableOpacity
-            style={styles.serverChip}
-            onPress={() => setShowTerminal(true)}
-            accessibilityRole="button"
-            accessibilityLabel="Open Server Console"
-          >
-            <View style={[styles.serverDot, serverReady ? styles.serverDotOnline : styles.serverDotOffline]} />
-            <Terminal size={13} color={colors.brand} style={{ marginRight: 4 }} />
-            <Text style={styles.serverChipText}>
-              {serverReady ? 'Dual T4: Online' : 'GPU: Console'}
+          {/* Simple status badge (GPU Console removed) */}
+          <View style={styles.headerStatusBadge}>
+            <View
+              style={[
+                styles.statusDot,
+                serverReady
+                  ? styles.statusDotReady
+                  : serverStarting
+                  ? styles.statusDotBooting
+                  : styles.statusDotIdle,
+              ]}
+            />
+            <Text style={styles.headerStatusText}>
+              {serverReady
+                ? 'Dual T4 Active'
+                : serverStarting
+                ? 'Booting (~250s)'
+                : 'Free Kaggle T4'}
             </Text>
-          </TouchableOpacity>
+          </View>
         </View>
 
         <TouchableOpacity
@@ -577,12 +607,6 @@ function detectQueryLanguage(text) {
         language={language}
         placeholder={t('placeholder', language)}
       />
-
-      {/* Kaggle Dual T4 Server Terminal Modal */}
-      <ServerTerminalModal
-        visible={showTerminal}
-        onClose={() => setShowTerminal(false)}
-      />
     </SafeAreaView>
   );
 }
@@ -631,7 +655,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.sm,
   },
-  serverChip: {
+  headerStatusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: spacing.sm + 2,
@@ -640,23 +664,26 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surfaceRaised,
+    gap: 6,
   },
-  serverDot: {
+  statusDot: {
     width: 7,
     height: 7,
     borderRadius: 3.5,
-    marginRight: 5,
   },
-  serverDotOnline: {
+  statusDotReady: {
     backgroundColor: '#10B981',
   },
-  serverDotOffline: {
+  statusDotBooting: {
+    backgroundColor: '#F59E0B',
+  },
+  statusDotIdle: {
     backgroundColor: '#94A3B8',
   },
-  serverChipText: {
+  headerStatusText: {
     fontSize: 12,
     fontWeight: '600',
-    color: colors.textPrimary,
+    color: colors.textSecondary || colors.textPrimary,
   },
   clearBtn: { padding: spacing.sm, borderRadius: radii.md },
   pressed: { opacity: 0.7 },
@@ -664,7 +691,7 @@ const styles = StyleSheet.create({
   // Server Starting Banner
   serverBanner: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     gap: spacing.sm,
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.sm + 2,
@@ -673,11 +700,41 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.borderAccent,
     zIndex: 2,
   },
+  serverBannerContent: {
+    flex: 1,
+  },
+  serverBannerTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 3,
+  },
   serverBannerText: {
     fontSize: 13,
-    fontWeight: '600',
+    fontWeight: '700',
     color: colors.brand,
     flex: 1,
+  },
+  serverBannerTimerBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.brandSubtle || colors.surface,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: radii.full,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  serverBannerTimerText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.brand,
+  },
+  serverBannerExplainer: {
+    fontSize: 11,
+    lineHeight: 15,
+    color: colors.textSecondary,
+    marginTop: 2,
   },
 
   // Thinking bar
